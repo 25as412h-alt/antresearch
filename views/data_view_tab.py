@@ -1,16 +1,14 @@
 """
-データ入力タブ (Phase 2 完全版)
-調査イベント、植生データ、アリ類データの入力機能を含む
+データ閲覧タブ
 """
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                               QTabWidget, QGroupBox, QFormLayout, QLineEdit,
-                               QDoubleSpinBox, QTextEdit, QComboBox, QLabel,
-                               QTableWidget, QTableWidgetItem, QMessageBox,
-                               QHeaderView, QDateEdit, QSpinBox, QCompleter)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+                               QTableWidget, QTableWidgetItem, QHeaderView,
+                               QGroupBox, QLineEdit, QLabel, QCheckBox,
+                               QComboBox, QDateEdit, QTextEdit, QSplitter,
+                               QTreeWidget, QTreeWidgetItem, QMessageBox)
 from PySide6.QtCore import Qt, QDate
-from PySide6.QtGui import QDoubleValidator
 import logging
-from datetime import date
+from datetime import datetime
 
 from models.parent_site import ParentSite
 from models.survey_site import SurveySite
@@ -22,8 +20,8 @@ from models.vegetation import VegetationData
 logger = logging.getLogger(__name__)
 
 
-class DataInputTab(QWidget):
-    """データ入力タブ"""
+class DataViewTab(QWidget):
+    """データ閲覧タブ"""
     
     def __init__(self, database):
         super().__init__()
@@ -37,11 +35,6 @@ class DataInputTab(QWidget):
         self.species_model = Species(self.conn)
         self.ant_record_model = AntRecord(self.conn)
         self.vegetation_model = VegetationData(self.conn)
-        
-        # 選択中のID
-        self.selected_parent_site_id = None
-        self.selected_survey_site_id = None
-        self.selected_event_id = None
         
         self._init_ui()
         self.refresh()
@@ -59,1069 +52,657 @@ class DataInputTab(QWidget):
         button_layout.addStretch()
         main_layout.addLayout(button_layout)
         
-        # サブタブウィジェット
-        self.sub_tab_widget = QTabWidget()
-        main_layout.addWidget(self.sub_tab_widget)
+        # 検索フィルタ
+        filter_group = QGroupBox("検索・フィルタ")
+        filter_layout = QVBoxLayout()
         
-        # 各タブを追加
-        self.sub_tab_widget.addTab(self._create_parent_site_tab(), "親調査地")
-        self.sub_tab_widget.addTab(self._create_survey_site_tab(), "調査地")
-        self.sub_tab_widget.addTab(self._create_survey_event_tab(), "調査イベント")
-        self.sub_tab_widget.addTab(self._create_vegetation_tab(), "植生データ")
-        self.sub_tab_widget.addTab(self._create_ant_data_tab(), "アリ類データ")
-    
-    def _create_parent_site_tab(self):
-        """親調査地タブ - 既存コードと同じ"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
+        # 検索バー
+        search_layout = QHBoxLayout()
+        search_layout.addWidget(QLabel("キーワード:"))
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("調査地名、備考などで検索...")
+        self.search_edit.textChanged.connect(self._on_search)
+        search_layout.addWidget(self.search_edit)
         
-        # 入力フォーム
-        form_group = QGroupBox("親調査地 登録・編集")
-        form_layout = QFormLayout()
+        self.search_button = QPushButton("検索")
+        self.search_button.clicked.connect(self._on_search)
+        search_layout.addWidget(self.search_button)
         
-        # 名称（必須）
-        self.ps_name_label = QLabel("名称:")
-        self.ps_name_label.setProperty("required", True)
-        self.ps_name_edit = QLineEdit()
-        self.ps_name_edit.setPlaceholderText("例: 中部_南信")
-        form_layout.addRow(self.ps_name_label, self.ps_name_edit)
+        self.clear_search_button = QPushButton("クリア")
+        self.clear_search_button.setObjectName("secondaryButton")
+        self.clear_search_button.clicked.connect(self._clear_search)
+        search_layout.addWidget(self.clear_search_button)
         
-        # 緯度（必須）
-        lat_layout = QHBoxLayout()
-        self.ps_lat_label = QLabel("緯度:")
-        self.ps_lat_label.setProperty("required", True)
-        self.ps_lat_edit = QDoubleSpinBox()
-        self.ps_lat_edit.setRange(20.0, 46.0)
-        self.ps_lat_edit.setDecimals(6)
-        self.ps_lat_edit.setSingleStep(0.001)
-        lat_layout.addWidget(self.ps_lat_edit)
-        lat_layout.addWidget(QLabel("°N"))
-        lat_layout.addStretch()
-        form_layout.addRow(self.ps_lat_label, lat_layout)
+        filter_layout.addLayout(search_layout)
         
-        # 経度（必須）
-        lon_layout = QHBoxLayout()
-        self.ps_lon_label = QLabel("経度:")
-        self.ps_lon_label.setProperty("required", True)
-        self.ps_lon_edit = QDoubleSpinBox()
-        self.ps_lon_edit.setRange(122.0, 154.0)
-        self.ps_lon_edit.setDecimals(6)
-        self.ps_lon_edit.setSingleStep(0.001)
-        lon_layout.addWidget(self.ps_lon_edit)
-        lon_layout.addWidget(QLabel("°E"))
-        lon_layout.addStretch()
-        form_layout.addRow(self.ps_lon_label, lon_layout)
+        # 表示オプション
+        option_layout = QHBoxLayout()
+        self.show_deleted_check = QCheckBox("削除済みを含める")
+        self.show_deleted_check.stateChanged.connect(self._on_filter_changed)
+        option_layout.addWidget(self.show_deleted_check)
         
-        # 標高
-        alt_layout = QHBoxLayout()
-        self.ps_alt_edit = QDoubleSpinBox()
-        self.ps_alt_edit.setRange(-500, 4000)
-        self.ps_alt_edit.setDecimals(1)
-        self.ps_alt_edit.setSpecialValueText("未設定")
-        self.ps_alt_edit.setValue(-500)
-        alt_layout.addWidget(self.ps_alt_edit)
-        alt_layout.addWidget(QLabel("m"))
-        alt_layout.addStretch()
-        form_layout.addRow("標高:", alt_layout)
+        option_layout.addWidget(QLabel("表示:"))
+        self.view_type_combo = QComboBox()
+        self.view_type_combo.addItems([
+            "調査イベント一覧",
+            "親調査地一覧",
+            "調査地一覧",
+            "種別出現記録"
+        ])
+        self.view_type_combo.currentTextChanged.connect(self._on_view_type_changed)
+        option_layout.addWidget(self.view_type_combo)
         
-        # 面積
-        area_layout = QHBoxLayout()
-        self.ps_area_edit = QDoubleSpinBox()
-        self.ps_area_edit.setRange(0, 999999999)
-        self.ps_area_edit.setDecimals(1)
-        self.ps_area_edit.setSpecialValueText("未設定")
-        area_layout.addWidget(self.ps_area_edit)
-        area_layout.addWidget(QLabel("m²"))
-        area_layout.addStretch()
-        form_layout.addRow("面積:", area_layout)
+        option_layout.addStretch()
+        filter_layout.addLayout(option_layout)
         
-        # 備考
-        self.ps_remarks_edit = QTextEdit()
-        self.ps_remarks_edit.setMaximumHeight(80)
-        form_layout.addRow("備考:", self.ps_remarks_edit)
+        filter_group.setLayout(filter_layout)
+        main_layout.addWidget(filter_group)
         
-        form_group.setLayout(form_layout)
-        layout.addWidget(form_group)
-        
-        # ボタン
-        button_layout = QHBoxLayout()
-        self.ps_add_button = QPushButton("新規登録")
-        self.ps_add_button.setObjectName("primaryButton")
-        self.ps_add_button.clicked.connect(self._on_add_parent_site)
-        button_layout.addWidget(self.ps_add_button)
-        
-        self.ps_update_button = QPushButton("更新")
-        self.ps_update_button.clicked.connect(self._on_update_parent_site)
-        self.ps_update_button.setEnabled(False)
-        button_layout.addWidget(self.ps_update_button)
-        
-        self.ps_delete_button = QPushButton("削除")
-        self.ps_delete_button.setObjectName("dangerButton")
-        self.ps_delete_button.clicked.connect(self._on_delete_parent_site)
-        self.ps_delete_button.setEnabled(False)
-        button_layout.addWidget(self.ps_delete_button)
-        
-        self.ps_clear_button = QPushButton("クリア")
-        self.ps_clear_button.setObjectName("secondaryButton")
-        self.ps_clear_button.clicked.connect(self._clear_parent_site_form)
-        button_layout.addWidget(self.ps_clear_button)
-        
-        button_layout.addStretch()
-        layout.addLayout(button_layout)
+        # スプリッター（一覧と詳細）
+        splitter = QSplitter(Qt.Vertical)
         
         # 一覧テーブル
-        list_group = QGroupBox("親調査地 一覧")
+        list_group = QGroupBox("一覧")
         list_layout = QVBoxLayout()
         
-        self.ps_table = QTableWidget()
-        self.ps_table.setColumnCount(7)
-        self.ps_table.setHorizontalHeaderLabels([
-            "ID", "名称", "緯度", "経度", "標高(m)", "面積(m²)", "備考"
-        ])
-        self.ps_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.ps_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.ps_table.setAlternatingRowColors(True)
-        self.ps_table.itemSelectionChanged.connect(self._on_parent_site_selected)
+        self.data_table = QTableWidget()
+        self.data_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.data_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.data_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.data_table.setAlternatingRowColors(True)
+        self.data_table.itemSelectionChanged.connect(self._on_row_selected)
         
-        list_layout.addWidget(self.ps_table)
+        list_layout.addWidget(self.data_table)
         list_group.setLayout(list_layout)
-        layout.addWidget(list_group)
+        splitter.addWidget(list_group)
         
-        return widget
-    
-    def _create_survey_site_tab(self):
-        """調査地タブ - 既存コードと同じ（省略）"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
+        # 詳細表示パネル
+        detail_group = QGroupBox("詳細情報")
+        detail_layout = QVBoxLayout()
         
-        form_group = QGroupBox("調査地 登録・編集")
-        form_layout = QFormLayout()
+        self.detail_text = QTextEdit()
+        self.detail_text.setReadOnly(True)
+        detail_layout.addWidget(self.detail_text)
         
-        # 親調査地選択
-        self.ss_parent_label = QLabel("親調査地:")
-        self.ss_parent_label.setProperty("required", True)
-        self.ss_parent_combo = QComboBox()
-        form_layout.addRow(self.ss_parent_label, self.ss_parent_combo)
+        detail_group.setLayout(detail_layout)
+        splitter.addWidget(detail_group)
         
-        # 名称
-        self.ss_name_label = QLabel("名称:")
-        self.ss_name_label.setProperty("required", True)
-        self.ss_name_edit = QLineEdit()
-        form_layout.addRow(self.ss_name_label, self.ss_name_edit)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
         
-        # 緯度経度（簡略版）
-        self.ss_lat_label = QLabel("緯度:")
-        self.ss_lat_label.setProperty("required", True)
-        self.ss_lat_edit = QDoubleSpinBox()
-        self.ss_lat_edit.setRange(20.0, 46.0)
-        self.ss_lat_edit.setDecimals(6)
-        form_layout.addRow(self.ss_lat_label, self.ss_lat_edit)
+        main_layout.addWidget(splitter)
         
-        self.ss_lon_label = QLabel("経度:")
-        self.ss_lon_label.setProperty("required", True)
-        self.ss_lon_edit = QDoubleSpinBox()
-        self.ss_lon_edit.setRange(122.0, 154.0)
-        self.ss_lon_edit.setDecimals(6)
-        form_layout.addRow(self.ss_lon_label, self.ss_lon_edit)
+        # 統計サマリー
+        stats_group = QGroupBox("統計サマリー")
+        stats_layout = QHBoxLayout()
         
-        self.ss_alt_edit = QDoubleSpinBox()
-        self.ss_alt_edit.setRange(-500, 4000)
-        self.ss_alt_edit.setSpecialValueText("未設定")
-        self.ss_alt_edit.setValue(-500)
-        form_layout.addRow("標高:", self.ss_alt_edit)
+        self.stats_label = QLabel("統計情報を読み込み中...")
+        stats_layout.addWidget(self.stats_label)
         
-        self.ss_area_edit = QDoubleSpinBox()
-        self.ss_area_edit.setRange(0, 999999999)
-        self.ss_area_edit.setSpecialValueText("未設定")
-        form_layout.addRow("面積:", self.ss_area_edit)
+        self.show_stats_button = QPushButton("詳細統計を表示")
+        self.show_stats_button.clicked.connect(self._show_detailed_stats)
+        stats_layout.addWidget(self.show_stats_button)
         
-        self.ss_remarks_edit = QTextEdit()
-        self.ss_remarks_edit.setMaximumHeight(80)
-        form_layout.addRow("備考:", self.ss_remarks_edit)
-        
-        form_group.setLayout(form_layout)
-        layout.addWidget(form_group)
-        
-        # ボタン
-        button_layout = QHBoxLayout()
-        self.ss_add_button = QPushButton("新規登録")
-        self.ss_add_button.setObjectName("primaryButton")
-        self.ss_add_button.clicked.connect(self._on_add_survey_site)
-        button_layout.addWidget(self.ss_add_button)
-        
-        self.ss_update_button = QPushButton("更新")
-        self.ss_update_button.clicked.connect(self._on_update_survey_site)
-        self.ss_update_button.setEnabled(False)
-        button_layout.addWidget(self.ss_update_button)
-        
-        self.ss_delete_button = QPushButton("削除")
-        self.ss_delete_button.setObjectName("dangerButton")
-        self.ss_delete_button.clicked.connect(self._on_delete_survey_site)
-        self.ss_delete_button.setEnabled(False)
-        button_layout.addWidget(self.ss_delete_button)
-        
-        self.ss_clear_button = QPushButton("クリア")
-        self.ss_clear_button.setObjectName("secondaryButton")
-        self.ss_clear_button.clicked.connect(self._clear_survey_site_form)
-        button_layout.addWidget(self.ss_clear_button)
-        
-        button_layout.addStretch()
-        layout.addLayout(button_layout)
-        
-        # 一覧テーブル
-        list_group = QGroupBox("調査地 一覧")
-        list_layout = QVBoxLayout()
-        
-        self.ss_table = QTableWidget()
-        self.ss_table.setColumnCount(8)
-        self.ss_table.setHorizontalHeaderLabels([
-            "ID", "親調査地", "名称", "緯度", "経度", "標高", "面積", "備考"
-        ])
-        self.ss_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.ss_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.ss_table.setAlternatingRowColors(True)
-        self.ss_table.itemSelectionChanged.connect(self._on_survey_site_selected)
-        
-        list_layout.addWidget(self.ss_table)
-        list_group.setLayout(list_layout)
-        layout.addWidget(list_group)
-        
-        return widget
-    
-    def _create_survey_event_tab(self):
-        """調査イベントタブ"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        form_group = QGroupBox("調査イベント 登録・編集")
-        form_layout = QFormLayout()
-        
-        # 調査地選択（必須）
-        self.se_site_label = QLabel("調査地:")
-        self.se_site_label.setProperty("required", True)
-        self.se_site_combo = QComboBox()
-        form_layout.addRow(self.se_site_label, self.se_site_combo)
-        
-        # 調査サイト（必須）
-        self.se_survey_site_label = QLabel("調査サイト:")
-        self.se_survey_site_label.setProperty("required", True)
-        self.se_survey_site_edit = QLineEdit()
-        self.se_survey_site_edit.setPlaceholderText("例: Plot1, A地点")
-        form_layout.addRow(self.se_survey_site_label, self.se_survey_site_edit)
-        
-        # 調査年月日（必須）
-        self.se_date_label = QLabel("調査年月日:")
-        self.se_date_label.setProperty("required", True)
-        self.se_date_edit = QDateEdit()
-        self.se_date_edit.setCalendarPopup(True)
-        self.se_date_edit.setDate(QDate.currentDate())
-        self.se_date_edit.setDisplayFormat("yyyy-MM-dd")
-        form_layout.addRow(self.se_date_label, self.se_date_edit)
-        
-        # 調査者名
-        self.se_surveyor_edit = QLineEdit()
-        form_layout.addRow("調査者名:", self.se_surveyor_edit)
-        
-        # 天候
-        self.se_weather_combo = QComboBox()
-        self.se_weather_combo.addItems(["", "晴れ", "曇り", "雨", "雪"])
-        form_layout.addRow("天候:", self.se_weather_combo)
-        
-        # 気温
-        temp_layout = QHBoxLayout()
-        self.se_temperature_spin = QDoubleSpinBox()
-        self.se_temperature_spin.setRange(-30, 50)
-        self.se_temperature_spin.setDecimals(1)
-        self.se_temperature_spin.setSpecialValueText("未測定")
-        self.se_temperature_spin.setValue(-30)
-        temp_layout.addWidget(self.se_temperature_spin)
-        temp_layout.addWidget(QLabel("℃"))
-        temp_layout.addStretch()
-        form_layout.addRow("気温:", temp_layout)
-        
-        # 備考
-        self.se_remarks_edit = QTextEdit()
-        self.se_remarks_edit.setMaximumHeight(80)
-        form_layout.addRow("備考:", self.se_remarks_edit)
-        
-        form_group.setLayout(form_layout)
-        layout.addWidget(form_group)
-        
-        # ボタン
-        button_layout = QHBoxLayout()
-        self.se_add_button = QPushButton("新規登録")
-        self.se_add_button.setObjectName("primaryButton")
-        self.se_add_button.clicked.connect(self._on_add_survey_event)
-        button_layout.addWidget(self.se_add_button)
-        
-        self.se_update_button = QPushButton("更新")
-        self.se_update_button.clicked.connect(self._on_update_survey_event)
-        self.se_update_button.setEnabled(False)
-        button_layout.addWidget(self.se_update_button)
-        
-        self.se_delete_button = QPushButton("削除")
-        self.se_delete_button.setObjectName("dangerButton")
-        self.se_delete_button.clicked.connect(self._on_delete_survey_event)
-        self.se_delete_button.setEnabled(False)
-        button_layout.addWidget(self.se_delete_button)
-        
-        self.se_clear_button = QPushButton("クリア")
-        self.se_clear_button.setObjectName("secondaryButton")
-        self.se_clear_button.clicked.connect(self._clear_survey_event_form)
-        button_layout.addWidget(self.se_clear_button)
-        
-        button_layout.addStretch()
-        layout.addLayout(button_layout)
-        
-        # 一覧テーブル
-        list_group = QGroupBox("調査イベント 一覧")
-        list_layout = QVBoxLayout()
-        
-        self.se_table = QTableWidget()
-        self.se_table.setColumnCount(8)
-        self.se_table.setHorizontalHeaderLabels([
-            "ID", "調査地", "サイト", "調査日", "調査者", "天候", "気温", "備考"
-        ])
-        self.se_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.se_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.se_table.setAlternatingRowColors(True)
-        self.se_table.itemSelectionChanged.connect(self._on_survey_event_selected)
-        
-        list_layout.addWidget(self.se_table)
-        list_group.setLayout(list_layout)
-        layout.addWidget(list_group)
-        
-        return widget
-    
-    def _create_vegetation_tab(self):
-        """植生データタブ（簡略版）"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        # 調査イベント選択
-        event_group = QGroupBox("調査イベント選択")
-        event_layout = QFormLayout()
-        
-        self.veg_event_label = QLabel("調査イベント:")
-        self.veg_event_label.setProperty("required", True)
-        self.veg_event_combo = QComboBox()
-        event_layout.addRow(self.veg_event_label, self.veg_event_combo)
-        
-        self.veg_load_button = QPushButton("データ読み込み")
-        self.veg_load_button.clicked.connect(self._load_vegetation_data)
-        event_layout.addRow("", self.veg_load_button)
-        
-        event_group.setLayout(event_layout)
-        layout.addWidget(event_group)
-        
-        # 植生データフォーム
-        form_group = QGroupBox("植生データ 登録・編集")
-        form_layout = QFormLayout()
-        
-        # 優占種
-        self.veg_dominant_tree_edit = QLineEdit()
-        form_layout.addRow("優占高木層樹種:", self.veg_dominant_tree_edit)
-        
-        self.veg_dominant_sasa_edit = QLineEdit()
-        form_layout.addRow("優占ササ種:", self.veg_dominant_sasa_edit)
-        
-        # 被度（主要項目のみ）
-        self.veg_canopy_coverage_spin = QDoubleSpinBox()
-        self.veg_canopy_coverage_spin.setRange(0, 100)
-        self.veg_canopy_coverage_spin.setSuffix(" %")
-        form_layout.addRow("高木層樹冠被度:", self.veg_canopy_coverage_spin)
-        
-        self.veg_sasa_coverage_spin = QDoubleSpinBox()
-        self.veg_sasa_coverage_spin.setRange(0, 100)
-        self.veg_sasa_coverage_spin.setSuffix(" %")
-        form_layout.addRow("ササ被度:", self.veg_sasa_coverage_spin)
-        
-        # 段階評価
-        self.veg_light_spin = QSpinBox()
-        self.veg_light_spin.setRange(1, 5)
-        form_layout.addRow("光条件(1-5):", self.veg_light_spin)
-        
-        self.veg_moisture_spin = QSpinBox()
-        self.veg_moisture_spin.setRange(1, 5)
-        form_layout.addRow("土壌湿潤(1-5):", self.veg_moisture_spin)
-        
-        form_group.setLayout(form_layout)
-        layout.addWidget(form_group)
-        
-        # ボタン
-        button_layout = QHBoxLayout()
-        self.veg_save_button = QPushButton("保存")
-        self.veg_save_button.setObjectName("primaryButton")
-        self.veg_save_button.clicked.connect(self._save_vegetation_data)
-        button_layout.addWidget(self.veg_save_button)
-        
-        self.veg_clear_button = QPushButton("クリア")
-        self.veg_clear_button.setObjectName("secondaryButton")
-        self.veg_clear_button.clicked.connect(self._clear_vegetation_form)
-        button_layout.addWidget(self.veg_clear_button)
-        
-        button_layout.addStretch()
-        layout.addLayout(button_layout)
-        
-        layout.addStretch()
-        
-        return widget
-    
-    def _create_ant_data_tab(self):
-        """アリ類データタブ"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        
-        # 調査イベント選択
-        event_group = QGroupBox("調査イベント選択")
-        event_layout = QFormLayout()
-        
-        self.ant_event_label = QLabel("調査イベント:")
-        self.ant_event_label.setProperty("required", True)
-        self.ant_event_combo = QComboBox()
-        event_layout.addRow(self.ant_event_label, self.ant_event_combo)
-        
-        self.ant_load_button = QPushButton("データ読み込み")
-        self.ant_load_button.clicked.connect(self._load_ant_records)
-        event_layout.addRow("", self.ant_load_button)
-        
-        event_group.setLayout(event_layout)
-        layout.addWidget(event_group)
-        
-        # アリ類データ入力
-        input_group = QGroupBox("アリ類データ 追加")
-        input_layout = QFormLayout()
-        
-        # 種名選択（オートコンプリート付き）
-        self.ant_species_label = QLabel("種名:")
-        self.ant_species_label.setProperty("required", True)
-        self.ant_species_combo = QComboBox()
-        self.ant_species_combo.setEditable(True)
-        input_layout.addRow(self.ant_species_label, self.ant_species_combo)
-        
-        # 個体数
-        self.ant_count_label = QLabel("個体数:")
-        self.ant_count_label.setProperty("required", True)
-        self.ant_count_spin = QSpinBox()
-        self.ant_count_spin.setRange(0, 999999)
-        input_layout.addRow(self.ant_count_label, self.ant_count_spin)
-        
-        # 備考
-        self.ant_remarks_edit = QLineEdit()
-        input_layout.addRow("備考:", self.ant_remarks_edit)
-        
-        input_group.setLayout(input_layout)
-        layout.addWidget(input_group)
-        
-        # ボタン
-        button_layout = QHBoxLayout()
-        self.ant_add_button = QPushButton("追加")
-        self.ant_add_button.setObjectName("primaryButton")
-        self.ant_add_button.clicked.connect(self._add_ant_record)
-        button_layout.addWidget(self.ant_add_button)
-        
-        self.ant_update_button = QPushButton("更新")
-        self.ant_update_button.clicked.connect(self._update_ant_record)
-        self.ant_update_button.setEnabled(False)
-        button_layout.addWidget(self.ant_update_button)
-        
-        self.ant_delete_button = QPushButton("削除")
-        self.ant_delete_button.setObjectName("dangerButton")
-        self.ant_delete_button.clicked.connect(self._delete_ant_record)
-        self.ant_delete_button.setEnabled(False)
-        button_layout.addWidget(self.ant_delete_button)
-        
-        self.ant_clear_button = QPushButton("クリア")
-        self.ant_clear_button.setObjectName("secondaryButton")
-        self.ant_clear_button.clicked.connect(self._clear_ant_form)
-        button_layout.addWidget(self.ant_clear_button)
-        
-        button_layout.addStretch()
-        layout.addLayout(button_layout)
-        
-        # 出現記録一覧
-        list_group = QGroupBox("出現記録 一覧")
-        list_layout = QVBoxLayout()
-        
-        self.ant_table = QTableWidget()
-        self.ant_table.setColumnCount(5)
-        self.ant_table.setHorizontalHeaderLabels([
-            "ID", "学名", "和名", "個体数", "備考"
-        ])
-        self.ant_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.ant_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.ant_table.setAlternatingRowColors(True)
-        self.ant_table.itemSelectionChanged.connect(self._on_ant_record_selected)
-        
-        list_layout.addWidget(self.ant_table)
-        list_group.setLayout(list_layout)
-        layout.addWidget(list_group)
-        
-        return widget
+        stats_layout.addStretch()
+        stats_group.setLayout(stats_layout)
+        main_layout.addWidget(stats_group)
     
     def refresh(self):
         """表示更新"""
-        self._load_parent_sites()
-        self._load_survey_sites()
-        self._load_survey_events()
-        self._update_parent_site_combo()
-        self._update_survey_site_combo()
-        self._update_event_combos()
-        self._update_species_combo()
-        logger.info("Data input tab refreshed")
+        self._on_view_type_changed()
+        self._update_statistics()
+        logger.info("Data view tab refreshed")
     
-    # 親調査地関連メソッド（既存コードと同じ）
-    def _load_parent_sites(self):
-        sites = self.parent_site_model.get_all()
-        self.ps_table.setRowCount(len(sites))
-        for row, site in enumerate(sites):
-            self.ps_table.setItem(row, 0, QTableWidgetItem(str(site['id'])))
-            self.ps_table.setItem(row, 1, QTableWidgetItem(site['name'] or ''))
-            self.ps_table.setItem(row, 2, QTableWidgetItem(f"{site['latitude']:.6f}" if site['latitude'] else ''))
-            self.ps_table.setItem(row, 3, QTableWidgetItem(f"{site['longitude']:.6f}" if site['longitude'] else ''))
-            self.ps_table.setItem(row, 4, QTableWidgetItem(f"{site['altitude']:.1f}" if site['altitude'] else ''))
-            self.ps_table.setItem(row, 5, QTableWidgetItem(f"{site['area']:.1f}" if site['area'] else ''))
-            self.ps_table.setItem(row, 6, QTableWidgetItem((site['remarks'] or '')[:50]))
+    def _on_view_type_changed(self):
+        """表示タイプ変更"""
+        view_type = self.view_type_combo.currentText()
+        
+        if view_type == "調査イベント一覧":
+            self._load_survey_events()
+        elif view_type == "親調査地一覧":
+            self._load_parent_sites()
+        elif view_type == "調査地一覧":
+            self._load_survey_sites()
+        elif view_type == "種別出現記録":
+            self._load_species_records()
     
-    def _on_add_parent_site(self):
-        name = self.ps_name_edit.text().strip()
-        if not name:
-            QMessageBox.warning(self, "入力エラー", "名称は必須項目です")
-            return
-        
-        site_id = self.parent_site_model.create(
-            name=name,
-            latitude=self.ps_lat_edit.value(),
-            longitude=self.ps_lon_edit.value(),
-            altitude=self.ps_alt_edit.value() if self.ps_alt_edit.value() > -500 else None,
-            area=self.ps_area_edit.value() if self.ps_area_edit.value() > 0 else None,
-            remarks=self.ps_remarks_edit.toPlainText().strip() or None
-        )
-        
-        if site_id:
-            QMessageBox.information(self, "成功", f"親調査地を登録しました (ID: {site_id})")
-            self._clear_parent_site_form()
-            self.refresh()
-        else:
-            QMessageBox.critical(self, "エラー", "親調査地の登録に失敗しました")
-    
-    def _on_update_parent_site(self):
-        if not self.selected_parent_site_id:
-            return
-        
-        name = self.ps_name_edit.text().strip()
-        if not name:
-            QMessageBox.warning(self, "入力エラー", "名称は必須項目です")
-            return
-        
-        success = self.parent_site_model.update(
-            self.selected_parent_site_id,
-            name=name,
-            latitude=self.ps_lat_edit.value(),
-            longitude=self.ps_lon_edit.value(),
-            altitude=self.ps_alt_edit.value() if self.ps_alt_edit.value() > -500 else None,
-            area=self.ps_area_edit.value() if self.ps_area_edit.value() > 0 else None,
-            remarks=self.ps_remarks_edit.toPlainText().strip() or None
-        )
-        
-        if success:
-            QMessageBox.information(self, "成功", "親調査地を更新しました")
-            self._clear_parent_site_form()
-            self.refresh()
-        else:
-            QMessageBox.critical(self, "エラー", "親調査地の更新に失敗しました")
-    
-    def _on_delete_parent_site(self):
-        if not self.selected_parent_site_id:
-            return
-        
-        reply = QMessageBox.question(self, "確認", "親調査地を削除しますか？",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        
-        if reply == QMessageBox.Yes:
-            if self.parent_site_model.delete(self.selected_parent_site_id):
-                QMessageBox.information(self, "成功", "親調査地を削除しました")
-                self._clear_parent_site_form()
-                self.refresh()
-            else:
-                QMessageBox.critical(self, "エラー", "親調査地の削除に失敗しました")
-    
-    def _clear_parent_site_form(self):
-        self.ps_name_edit.clear()
-        self.ps_lat_edit.setValue(35.0)
-        self.ps_lon_edit.setValue(138.0)
-        self.ps_alt_edit.setValue(-500)
-        self.ps_area_edit.setValue(0)
-        self.ps_remarks_edit.clear()
-        self.ps_update_button.setEnabled(False)
-        self.ps_delete_button.setEnabled(False)
-        self.selected_parent_site_id = None
-        self.ps_table.clearSelection()
-    
-    def _on_parent_site_selected(self):
-        selected = self.ps_table.selectedItems()
-        if not selected:
-            return
-        
-        row = selected[0].row()
-        site_id = int(self.ps_table.item(row, 0).text())
-        site = self.parent_site_model.get_by_id(site_id)
-        
-        if site:
-            self.selected_parent_site_id = site_id
-            self.ps_name_edit.setText(site['name'] or '')
-            self.ps_lat_edit.setValue(site['latitude'] or 35.0)
-            self.ps_lon_edit.setValue(site['longitude'] or 138.0)
-            self.ps_alt_edit.setValue(site['altitude'] if site['altitude'] is not None else -500)
-            self.ps_area_edit.setValue(site['area'] if site['area'] is not None else 0)
-            self.ps_remarks_edit.setPlainText(site['remarks'] or '')
-            self.ps_update_button.setEnabled(True)
-            self.ps_delete_button.setEnabled(True)
-    
-    # 調査地関連メソッド（省略 - 親調査地と同様の実装）
-    def _load_survey_sites(self):
-        sites = self.survey_site_model.get_all()
-        self.ss_table.setRowCount(len(sites))
-        for row, site in enumerate(sites):
-            self.ss_table.setItem(row, 0, QTableWidgetItem(str(site['id'])))
-            self.ss_table.setItem(row, 1, QTableWidgetItem(site.get('parent_site_name', '')))
-            self.ss_table.setItem(row, 2, QTableWidgetItem(site['name'] or ''))
-            self.ss_table.setItem(row, 3, QTableWidgetItem(f"{site['latitude']:.6f}" if site['latitude'] else ''))
-            self.ss_table.setItem(row, 4, QTableWidgetItem(f"{site['longitude']:.6f}" if site['longitude'] else ''))
-            self.ss_table.setItem(row, 5, QTableWidgetItem(f"{site['altitude']:.1f}" if site['altitude'] else ''))
-            self.ss_table.setItem(row, 6, QTableWidgetItem(f"{site['area']:.1f}" if site['area'] else ''))
-            self.ss_table.setItem(row, 7, QTableWidgetItem((site['remarks'] or '')[:50]))
-    
-    def _update_parent_site_combo(self):
-        self.ss_parent_combo.clear()
-        sites = self.parent_site_model.get_all()
-        for site in sites:
-            self.ss_parent_combo.addItem(site['name'], site['id'])
-    
-    def _update_survey_site_combo(self):
-        self.se_site_combo.clear()
-        sites = self.survey_site_model.get_all()
-        for site in sites:
-            display_name = f"{site.get('parent_site_name', '')} - {site['name']}"
-            self.se_site_combo.addItem(display_name, site['id'])
-    
-    def _on_add_survey_site(self):
-        if self.ss_parent_combo.count() == 0:
-            QMessageBox.warning(self, "エラー", "親調査地が登録されていません")
-            return
-        
-        name = self.ss_name_edit.text().strip()
-        if not name:
-            QMessageBox.warning(self, "入力エラー", "名称は必須項目です")
-            return
-        
-        site_id = self.survey_site_model.create(
-            parent_site_id=self.ss_parent_combo.currentData(),
-            name=name,
-            latitude=self.ss_lat_edit.value(),
-            longitude=self.ss_lon_edit.value(),
-            altitude=self.ss_alt_edit.value() if self.ss_alt_edit.value() > -500 else None,
-            area=self.ss_area_edit.value() if self.ss_area_edit.value() > 0 else None,
-            remarks=self.ss_remarks_edit.toPlainText().strip() or None
-        )
-        
-        if site_id:
-            QMessageBox.information(self, "成功", f"調査地を登録しました (ID: {site_id})")
-            self._clear_survey_site_form()
-            self.refresh()
-        else:
-            QMessageBox.critical(self, "エラー", "調査地の登録に失敗しました")
-    
-    def _on_update_survey_site(self):
-        if not self.selected_survey_site_id:
-            return
-        
-        name = self.ss_name_edit.text().strip()
-        if not name:
-            QMessageBox.warning(self, "入力エラー", "名称は必須項目です")
-            return
-        
-        success = self.survey_site_model.update(
-            self.selected_survey_site_id,
-            parent_site_id=self.ss_parent_combo.currentData(),
-            name=name,
-            latitude=self.ss_lat_edit.value(),
-            longitude=self.ss_lon_edit.value(),
-            altitude=self.ss_alt_edit.value() if self.ss_alt_edit.value() > -500 else None,
-            area=self.ss_area_edit.value() if self.ss_area_edit.value() > 0 else None,
-            remarks=self.ss_remarks_edit.toPlainText().strip() or None
-        )
-        
-        if success:
-            QMessageBox.information(self, "成功", "調査地を更新しました")
-            self._clear_survey_site_form()
-            self.refresh()
-        else:
-            QMessageBox.critical(self, "エラー", "調査地の更新に失敗しました")
-    
-    def _on_delete_survey_site(self):
-        if not self.selected_survey_site_id:
-            return
-        
-        reply = QMessageBox.question(self, "確認", "調査地を削除しますか？",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        
-        if reply == QMessageBox.Yes:
-            if self.survey_site_model.delete(self.selected_survey_site_id):
-                QMessageBox.information(self, "成功", "調査地を削除しました")
-                self._clear_survey_site_form()
-                self.refresh()
-            else:
-                QMessageBox.critical(self, "エラー", "調査地の削除に失敗しました")
-    
-    def _clear_survey_site_form(self):
-        self.ss_name_edit.clear()
-        self.ss_lat_edit.setValue(35.0)
-        self.ss_lon_edit.setValue(138.0)
-        self.ss_alt_edit.setValue(-500)
-        self.ss_area_edit.setValue(0)
-        self.ss_remarks_edit.clear()
-        self.ss_update_button.setEnabled(False)
-        self.ss_delete_button.setEnabled(False)
-        self.selected_survey_site_id = None
-        self.ss_table.clearSelection()
-    
-    def _on_survey_site_selected(self):
-        selected = self.ss_table.selectedItems()
-        if not selected:
-            return
-        
-        row = selected[0].row()
-        site_id = int(self.ss_table.item(row, 0).text())
-        site = self.survey_site_model.get_by_id(site_id)
-        
-        if site:
-            self.selected_survey_site_id = site_id
-            index = self.ss_parent_combo.findData(site['parent_site_id'])
-            if index >= 0:
-                self.ss_parent_combo.setCurrentIndex(index)
-            self.ss_name_edit.setText(site['name'] or '')
-            self.ss_lat_edit.setValue(site['latitude'] or 35.0)
-            self.ss_lon_edit.setValue(site['longitude'] or 138.0)
-            self.ss_alt_edit.setValue(site['altitude'] if site['altitude'] is not None else -500)
-            self.ss_area_edit.setValue(site['area'] if site['area'] is not None else 0)
-            self.ss_remarks_edit.setPlainText(site['remarks'] or '')
-            self.ss_update_button.setEnabled(True)
-            self.ss_delete_button.setEnabled(True)
-    
-    # 調査イベント関連メソッド
     def _load_survey_events(self):
-        events = self.survey_event_model.get_all()
-        self.se_table.setRowCount(len(events))
+        """調査イベント一覧を読み込み"""
+        include_deleted = self.show_deleted_check.isChecked()
+        events = self.survey_event_model.get_all(include_deleted)
+        
+        # 検索フィルタ適用
+        keyword = self.search_edit.text().strip().lower()
+        if keyword:
+            events = [e for e in events if 
+                     keyword in (e.get('survey_site_name', '') or '').lower() or
+                     keyword in (e.get('survey_site', '') or '').lower() or
+                     keyword in (e.get('surveyor_name', '') or '').lower() or
+                     keyword in (e.get('remarks', '') or '').lower()]
+        
+        self.data_table.setColumnCount(9)
+        self.data_table.setHorizontalHeaderLabels([
+            "ID", "親調査地", "調査地", "サイト", "調査日", "調査者", "天候", "気温", "備考"
+        ])
+        
+        self.data_table.setRowCount(len(events))
         for row, event in enumerate(events):
-            self.se_table.setItem(row, 0, QTableWidgetItem(str(event['id'])))
-            self.se_table.setItem(row, 1, QTableWidgetItem(event.get('survey_site_name', '')))
-            self.se_table.setItem(row, 2, QTableWidgetItem(event['survey_site'] or ''))
-            self.se_table.setItem(row, 3, QTableWidgetItem(event['survey_date'] or ''))
-            self.se_table.setItem(row, 4, QTableWidgetItem(event['surveyor_name'] or ''))
-            self.se_table.setItem(row, 5, QTableWidgetItem(event['weather'] or ''))
-            self.se_table.setItem(row, 6, QTableWidgetItem(f"{event['temperature']:.1f}" if event['temperature'] else ''))
-            self.se_table.setItem(row, 7, QTableWidgetItem((event['remarks'] or '')[:50]))
+            self.data_table.setItem(row, 0, QTableWidgetItem(str(event['id'])))
+            self.data_table.setItem(row, 1, QTableWidgetItem(event.get('parent_site_name', '')))
+            self.data_table.setItem(row, 2, QTableWidgetItem(event.get('survey_site_name', '')))
+            self.data_table.setItem(row, 3, QTableWidgetItem(event['survey_site'] or ''))
+            self.data_table.setItem(row, 4, QTableWidgetItem(event['survey_date'] or ''))
+            self.data_table.setItem(row, 5, QTableWidgetItem(event['surveyor_name'] or ''))
+            self.data_table.setItem(row, 6, QTableWidgetItem(event['weather'] or ''))
+            self.data_table.setItem(row, 7, QTableWidgetItem(f"{event['temperature']:.1f}℃" if event['temperature'] else ''))
+            self.data_table.setItem(row, 8, QTableWidgetItem((event['remarks'] or '')[:50]))
+        
+        # 列幅調整
+        header = self.data_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
     
-    def _update_event_combos(self):
-        events = self.survey_event_model.get_all()
+    def _load_parent_sites(self):
+        """親調査地一覧を読み込み"""
+        include_deleted = self.show_deleted_check.isChecked()
+        sites = self.parent_site_model.get_all(include_deleted)
         
-        # 植生データ用
-        self.veg_event_combo.clear()
-        # アリ類データ用
-        self.ant_event_combo.clear()
+        # 検索フィルタ適用
+        keyword = self.search_edit.text().strip().lower()
+        if keyword:
+            sites = [s for s in sites if 
+                    keyword in (s['name'] or '').lower() or
+                    keyword in (s['remarks'] or '').lower()]
         
-        for event in events:
-            display = f"{event.get('survey_site_name', '')} - {event['survey_date']}"
-            self.veg_event_combo.addItem(display, event['id'])
-            self.ant_event_combo.addItem(display, event['id'])
+        self.data_table.setColumnCount(7)
+        self.data_table.setHorizontalHeaderLabels([
+            "ID", "名称", "緯度", "経度", "標高(m)", "面積(m²)", "備考"
+        ])
+        
+        self.data_table.setRowCount(len(sites))
+        for row, site in enumerate(sites):
+            self.data_table.setItem(row, 0, QTableWidgetItem(str(site['id'])))
+            self.data_table.setItem(row, 1, QTableWidgetItem(site['name'] or ''))
+            self.data_table.setItem(row, 2, QTableWidgetItem(f"{site['latitude']:.6f}" if site['latitude'] else ''))
+            self.data_table.setItem(row, 3, QTableWidgetItem(f"{site['longitude']:.6f}" if site['longitude'] else ''))
+            self.data_table.setItem(row, 4, QTableWidgetItem(f"{site['altitude']:.1f}" if site['altitude'] else ''))
+            self.data_table.setItem(row, 5, QTableWidgetItem(f"{site['area']:.1f}" if site['area'] else ''))
+            self.data_table.setItem(row, 6, QTableWidgetItem((site['remarks'] or '')[:50]))
     
-    def _on_add_survey_event(self):
-        if self.se_site_combo.count() == 0:
-            QMessageBox.warning(self, "エラー", "調査地が登録されていません")
-            return
+    def _load_survey_sites(self):
+        """調査地一覧を読み込み"""
+        include_deleted = self.show_deleted_check.isChecked()
+        sites = self.survey_site_model.get_all(include_deleted)
         
-        survey_site = self.se_survey_site_edit.text().strip()
-        if not survey_site:
-            QMessageBox.warning(self, "入力エラー", "調査サイトは必須項目です")
-            return
+        # 検索フィルタ適用
+        keyword = self.search_edit.text().strip().lower()
+        if keyword:
+            sites = [s for s in sites if 
+                    keyword in (s['name'] or '').lower() or
+                    keyword in (s.get('parent_site_name', '') or '').lower() or
+                    keyword in (s['remarks'] or '').lower()]
         
-        survey_date = self.se_date_edit.date().toPython()
+        self.data_table.setColumnCount(8)
+        self.data_table.setHorizontalHeaderLabels([
+            "ID", "親調査地", "名称", "緯度", "経度", "標高(m)", "面積(m²)", "備考"
+        ])
         
-        event_id = self.survey_event_model.create(
-            survey_site_id=self.se_site_combo.currentData(),
-            survey_site=survey_site,
-            survey_date=survey_date,
-            surveyor_name=self.se_surveyor_edit.text().strip() or None,
-            weather=self.se_weather_combo.currentText() or None,
-            temperature=self.se_temperature_spin.value() if self.se_temperature_spin.value() > -30 else None,
-            remarks=self.se_remarks_edit.toPlainText().strip() or None
-        )
-        
-        if event_id:
-            QMessageBox.information(self, "成功", f"調査イベントを登録しました (ID: {event_id})")
-            self._clear_survey_event_form()
-            self.refresh()
-        else:
-            QMessageBox.critical(self, "エラー", "調査イベントの登録に失敗しました\n同じ日付の調査が既に存在する可能性があります")
+        self.data_table.setRowCount(len(sites))
+        for row, site in enumerate(sites):
+            self.data_table.setItem(row, 0, QTableWidgetItem(str(site['id'])))
+            self.data_table.setItem(row, 1, QTableWidgetItem(site.get('parent_site_name', '')))
+            self.data_table.setItem(row, 2, QTableWidgetItem(site['name'] or ''))
+            self.data_table.setItem(row, 3, QTableWidgetItem(f"{site['latitude']:.6f}" if site['latitude'] else ''))
+            self.data_table.setItem(row, 4, QTableWidgetItem(f"{site['longitude']:.6f}" if site['longitude'] else ''))
+            self.data_table.setItem(row, 5, QTableWidgetItem(f"{site['altitude']:.1f}" if site['altitude'] else ''))
+            self.data_table.setItem(row, 6, QTableWidgetItem(f"{site['area']:.1f}" if site['area'] else ''))
+            self.data_table.setItem(row, 7, QTableWidgetItem((site['remarks'] or '')[:50]))
     
-    def _on_update_survey_event(self):
-        if not self.selected_event_id:
-            return
+    def _load_species_records(self):
+        """種別出現記録を読み込み"""
+        include_deleted = self.show_deleted_check.isChecked()
+        species_list = self.species_model.get_all(include_deleted)
         
-        survey_site = self.se_survey_site_edit.text().strip()
-        if not survey_site:
-            QMessageBox.warning(self, "入力エラー", "調査サイトは必須項目です")
-            return
+        # 検索フィルタ適用
+        keyword = self.search_edit.text().strip().lower()
+        if keyword:
+            species_list = [s for s in species_list if 
+                           keyword in (s['scientific_name'] or '').lower() or
+                           keyword in (s['ja_name'] or '').lower() or
+                           keyword in (s['genus'] or '').lower()]
         
-        success = self.survey_event_model.update(
-            self.selected_event_id,
-            survey_site_id=self.se_site_combo.currentData(),
-            survey_site=survey_site,
-            survey_date=self.se_date_edit.date().toPython(),
-            surveyor_name=self.se_surveyor_edit.text().strip() or None,
-            weather=self.se_weather_combo.currentText() or None,
-            temperature=self.se_temperature_spin.value() if self.se_temperature_spin.value() > -30 else None,
-            remarks=self.se_remarks_edit.toPlainText().strip() or None
-        )
+        self.data_table.setColumnCount(7)
+        self.data_table.setHorizontalHeaderLabels([
+            "ID", "学名", "和名", "属", "亜科", "出現回数", "総個体数"
+        ])
         
-        if success:
-            QMessageBox.information(self, "成功", "調査イベントを更新しました")
-            self._clear_survey_event_form()
-            self.refresh()
-        else:
-            QMessageBox.critical(self, "エラー", "調査イベントの更新に失敗しました")
+        self.data_table.setRowCount(len(species_list))
+        for row, species in enumerate(species_list):
+            # 統計情報を取得
+            stats = self.ant_record_model.get_statistics_by_species(species['id'])
+            
+            self.data_table.setItem(row, 0, QTableWidgetItem(str(species['id'])))
+            self.data_table.setItem(row, 1, QTableWidgetItem(species['scientific_name'] or ''))
+            self.data_table.setItem(row, 2, QTableWidgetItem(species['ja_name'] or ''))
+            self.data_table.setItem(row, 3, QTableWidgetItem(species['genus'] or ''))
+            self.data_table.setItem(row, 4, QTableWidgetItem(species['subfamily'] or ''))
+            self.data_table.setItem(row, 5, QTableWidgetItem(str(stats.get('occurrence_count', 0))))
+            
+            # 総個体数を計算
+            total_count = stats.get('occurrence_count', 0) * stats.get('avg_count', 0)
+            self.data_table.setItem(row, 6, QTableWidgetItem(f"{total_count:.0f}"))
     
-    def _on_delete_survey_event(self):
-        if not self.selected_event_id:
-            return
-        
-        reply = QMessageBox.question(self, "確認", "調査イベントを削除しますか？",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        
-        if reply == QMessageBox.Yes:
-            if self.survey_event_model.delete(self.selected_event_id):
-                QMessageBox.information(self, "成功", "調査イベントを削除しました")
-                self._clear_survey_event_form()
-                self.refresh()
-            else:
-                QMessageBox.critical(self, "エラー", "調査イベントの削除に失敗しました")
+    def _on_search(self):
+        """検索実行"""
+        self._on_view_type_changed()
     
-    def _clear_survey_event_form(self):
-        self.se_survey_site_edit.clear()
-        self.se_date_edit.setDate(QDate.currentDate())
-        self.se_surveyor_edit.clear()
-        self.se_weather_combo.setCurrentIndex(0)
-        self.se_temperature_spin.setValue(-30)
-        self.se_remarks_edit.clear()
-        self.se_update_button.setEnabled(False)
-        self.se_delete_button.setEnabled(False)
-        self.selected_event_id = None
-        self.se_table.clearSelection()
+    def _clear_search(self):
+        """検索クリア"""
+        self.search_edit.clear()
+        self._on_view_type_changed()
     
-    def _on_survey_event_selected(self):
-        selected = self.se_table.selectedItems()
+    def _on_filter_changed(self):
+        """フィルタ変更"""
+        self._on_view_type_changed()
+    
+    def _on_row_selected(self):
+        """行選択時の詳細表示"""
+        selected = self.data_table.selectedItems()
         if not selected:
+            self.detail_text.clear()
             return
         
         row = selected[0].row()
-        event_id = int(self.se_table.item(row, 0).text())
-        event = self.survey_event_model.get_by_id(event_id)
+        record_id = int(self.data_table.item(row, 0).text())
+        view_type = self.view_type_combo.currentText()
         
-        if event:
-            self.selected_event_id = event_id
-            index = self.se_site_combo.findData(event['survey_site_id'])
-            if index >= 0:
-                self.se_site_combo.setCurrentIndex(index)
-            self.se_survey_site_edit.setText(event['survey_site'] or '')
-            
-            from datetime import datetime
-            date_obj = datetime.strptime(event['survey_date'], '%Y-%m-%d').date()
-            self.se_date_edit.setDate(QDate(date_obj.year, date_obj.month, date_obj.day))
-            
-            self.se_surveyor_edit.setText(event['surveyor_name'] or '')
-            if event['weather']:
-                index = self.se_weather_combo.findText(event['weather'])
-                if index >= 0:
-                    self.se_weather_combo.setCurrentIndex(index)
-            self.se_temperature_spin.setValue(event['temperature'] if event['temperature'] else -30)
-            self.se_remarks_edit.setPlainText(event['remarks'] or '')
-            self.se_update_button.setEnabled(True)
-            self.se_delete_button.setEnabled(True)
+        if view_type == "調査イベント一覧":
+            self._show_event_detail(record_id)
+        elif view_type == "親調査地一覧":
+            self._show_parent_site_detail(record_id)
+        elif view_type == "調査地一覧":
+            self._show_survey_site_detail(record_id)
+        elif view_type == "種別出現記録":
+            self._show_species_detail(record_id)
     
-    # 植生データ関連メソッド
-    def _load_vegetation_data(self):
-        if self.veg_event_combo.count() == 0:
-            QMessageBox.warning(self, "エラー", "調査イベントが選択されていません")
+    def _show_event_detail(self, event_id: int):
+        """調査イベント詳細"""
+        event = self.survey_event_model.get_by_id(event_id)
+        if not event:
             return
         
-        event_id = self.veg_event_combo.currentData()
+        # 植生データ取得
         veg_data = self.vegetation_model.get_by_event(event_id)
         
+        # アリ類記録取得
+        ant_records = self.ant_record_model.get_by_event(event_id)
+        
+        detail_html = f"""
+        <h3>調査イベント詳細</h3>
+        <table border="1" cellpadding="5">
+        <tr><th>項目</th><th>内容</th></tr>
+        <tr><td>ID</td><td>{event['id']}</td></tr>
+        <tr><td>親調査地</td><td>{event.get('parent_site_name', '')}</td></tr>
+        <tr><td>調査地</td><td>{event.get('survey_site_name', '')}</td></tr>
+        <tr><td>調査サイト</td><td>{event['survey_site']}</td></tr>
+        <tr><td>調査日</td><td>{event['survey_date']}</td></tr>
+        <tr><td>調査者</td><td>{event['surveyor_name'] or '-'}</td></tr>
+        <tr><td>天候</td><td>{event['weather'] or '-'}</td></tr>
+        <tr><td>気温</td><td>{event['temperature'] if event['temperature'] is not None else '-'}℃</td></tr>
+        <tr><td>備考</td><td>{event['remarks'] or '-'}</td></tr>
+        </table>
+        
+        <h4>植生データ</h4>
+        """
+        
         if veg_data:
-            self.veg_dominant_tree_edit.setText(veg_data.get('dominant_tree', '') or '')
-            self.veg_dominant_sasa_edit.setText(veg_data.get('dominant_sasa', '') or '')
-            self.veg_canopy_coverage_spin.setValue(veg_data.get('canopy_coverage', 0) or 0)
-            self.veg_sasa_coverage_spin.setValue(veg_data.get('sasa_coverage', 0) or 0)
-            self.veg_light_spin.setValue(veg_data.get('light_condition', 3) or 3)
-            self.veg_moisture_spin.setValue(veg_data.get('soil_moisture', 3) or 3)
+            detail_html += f"""
+            <table border="1" cellpadding="5">
+            <tr><td>優占高木層樹種</td><td>{veg_data.get('dominant_tree') or '-'}</td></tr>
+            <tr><td>優占ササ種</td><td>{veg_data.get('dominant_sasa') or '-'}</td></tr>
+            <tr><td>高木層樹冠被度</td><td>{veg_data.get('canopy_coverage') if veg_data.get('canopy_coverage') is not None else '-'}%</td></tr>
+            <tr><td>ササ被度</td><td>{veg_data.get('sasa_coverage') if veg_data.get('sasa_coverage') is not None else '-'}%</td></tr>
+            <tr><td>光条件</td><td>{veg_data.get('light_condition') or '-'}</td></tr>
+            <tr><td>土壌湿潤</td><td>{veg_data.get('soil_moisture') or '-'}</td></tr>
+            </table>
+            """
         else:
-            self._clear_vegetation_form()
-    
-    def _save_vegetation_data(self):
-        if self.veg_event_combo.count() == 0:
-            QMessageBox.warning(self, "エラー", "調査イベントが選択されていません")
-            return
+            detail_html += "<p>植生データなし</p>"
         
-        event_id = self.veg_event_combo.currentData()
+        detail_html += f"""
+        <h4>アリ類出現記録（{len(ant_records)}種）</h4>
+        """
         
-        # 既存データがあるかチェック
-        existing = self.vegetation_model.get_by_event(event_id)
-        
-        data = {
-            'dominant_tree': self.veg_dominant_tree_edit.text().strip() or None,
-            'dominant_sasa': self.veg_dominant_sasa_edit.text().strip() or None,
-            'canopy_coverage': self.veg_canopy_coverage_spin.value() if self.veg_canopy_coverage_spin.value() > 0 else None,
-            'sasa_coverage': self.veg_sasa_coverage_spin.value() if self.veg_sasa_coverage_spin.value() > 0 else None,
-            'light_condition': self.veg_light_spin.value(),
-            'soil_moisture': self.veg_moisture_spin.value()
-        }
-        
-        if existing:
-            success = self.vegetation_model.update(event_id, **data)
-            if success:
-                QMessageBox.information(self, "成功", "植生データを更新しました")
-            else:
-                QMessageBox.critical(self, "エラー", "植生データの更新に失敗しました")
+        if ant_records:
+            detail_html += """
+            <table border="1" cellpadding="5">
+            <tr><th>学名</th><th>和名</th><th>個体数</th></tr>
+            """
+            for record in ant_records:
+                detail_html += f"""
+                <tr>
+                    <td>{record.get('scientific_name', '')}</td>
+                    <td>{record.get('ja_name', '')}</td>
+                    <td>{record['count']}</td>
+                </tr>
+                """
+            detail_html += "</table>"
         else:
-            veg_id = self.vegetation_model.create(event_id, **data)
-            if veg_id:
-                QMessageBox.information(self, "成功", "植生データを登録しました")
-            else:
-                QMessageBox.critical(self, "エラー", "植生データの登録に失敗しました")
-    
-    def _clear_vegetation_form(self):
-        self.veg_dominant_tree_edit.clear()
-        self.veg_dominant_sasa_edit.clear()
-        self.veg_canopy_coverage_spin.setValue(0)
-        self.veg_sasa_coverage_spin.setValue(0)
-        self.veg_light_spin.setValue(3)
-        self.veg_moisture_spin.setValue(3)
-    
-    # アリ類データ関連メソッド
-    def _update_species_combo(self):
-        species_list = self.species_model.get_all()
-        self.ant_species_combo.clear()
+            detail_html += "<p>アリ類記録なし</p>"
         
-        for species in species_list:
-            display = f"{species['scientific_name']}"
-            if species['ja_name']:
-                display += f" ({species['ja_name']})"
-            self.ant_species_combo.addItem(display, species['id'])
+        self.detail_text.setHtml(detail_html)
     
-    def _load_ant_records(self):
-        if self.ant_event_combo.count() == 0:
-            QMessageBox.warning(self, "エラー", "調査イベントが選択されていません")
+    def _show_parent_site_detail(self, site_id: int):
+        """親調査地詳細"""
+        site = self.parent_site_model.get_by_id(site_id)
+        if not site:
             return
         
-        event_id = self.ant_event_combo.currentData()
-        records = self.ant_record_model.get_by_event(event_id)
+        # 紐づく調査地数を取得
+        survey_sites = self.survey_site_model.get_by_parent(site_id)
         
-        self.ant_table.setRowCount(len(records))
-        for row, record in enumerate(records):
-            self.ant_table.setItem(row, 0, QTableWidgetItem(str(record['id'])))
-            self.ant_table.setItem(row, 1, QTableWidgetItem(record.get('scientific_name', '')))
-            self.ant_table.setItem(row, 2, QTableWidgetItem(record.get('ja_name', '')))
-            self.ant_table.setItem(row, 3, QTableWidgetItem(str(record['count'])))
-            self.ant_table.setItem(row, 4, QTableWidgetItem(record['remarks'] or ''))
-    
-    def _add_ant_record(self):
-        if self.ant_event_combo.count() == 0:
-            QMessageBox.warning(self, "エラー", "調査イベントが選択されていません")
-            return
+        detail_html = f"""
+        <h3>親調査地詳細</h3>
+        <table border="1" cellpadding="5">
+        <tr><th>項目</th><th>内容</th></tr>
+        <tr><td>ID</td><td>{site['id']}</td></tr>
+        <tr><td>名称</td><td>{site['name']}</td></tr>
+        <tr><td>緯度</td><td>{site['latitude']:.6f}°N</td></tr>
+        <tr><td>経度</td><td>{site['longitude']:.6f}°E</td></tr>
+        <tr><td>標高</td><td>{'-' if site['altitude'] is None else format(site['altitude'], '.1f')}m</td></tr>
+        <tr><td>面積</td><td>{'-' if site['area'] is None else format(site['area'], '.1f')}m²</td></tr>
+        <tr><td>備考</td><td>{site['remarks'] or '-'}</td></tr>
+        <tr><td>登録日</td><td>{site['created_at']}</td></tr>
+        <tr><td>更新日</td><td>{site['updated_at']}</td></tr>
+        </table>
         
-        if self.ant_species_combo.count() == 0:
-            QMessageBox.warning(self, "エラー", "種名マスタが登録されていません")
-            return
+        <h4>紐づく調査地（{len(survey_sites)}件）</h4>
+        """
         
-        event_id = self.ant_event_combo.currentData()
-        species_id = self.ant_species_combo.currentData()
-        count = self.ant_count_spin.value()
-        remarks = self.ant_remarks_edit.text().strip() or None
-        
-        record_id = self.ant_record_model.create(event_id, species_id, count, remarks)
-        
-        if record_id:
-            QMessageBox.information(self, "成功", "アリ類記録を追加しました")
-            self._clear_ant_form()
-            self._load_ant_records()
+        if survey_sites:
+            detail_html += """
+            <ul>
+            """
+            for ss in survey_sites:
+                detail_html += f"<li>{ss['name']}</li>"
+            detail_html += "</ul>"
         else:
-            QMessageBox.critical(self, "エラー", "アリ類記録の追加に失敗しました\n同じ種が既に登録されている可能性があります")
+            detail_html += "<p>調査地なし</p>"
+        
+        self.detail_text.setHtml(detail_html)
     
-    def _update_ant_record(self):
-        selected = self.ant_table.selectedItems()
-        if not selected:
+    def _show_survey_site_detail(self, site_id: int):
+        """調査地詳細"""
+        site = self.survey_site_model.get_by_id(site_id)
+        if not site:
             return
         
-        row = selected[0].row()
-        record_id = int(self.ant_table.item(row, 0).text())
+        # 調査イベント数を取得
+        events = self.survey_event_model.get_by_site(site_id)
         
-        success = self.ant_record_model.update(
-            record_id,
-            species_id=self.ant_species_combo.currentData(),
-            count=self.ant_count_spin.value(),
-            remarks=self.ant_remarks_edit.text().strip() or None
-        )
+        detail_html = f"""
+        <h3>調査地詳細</h3>
+        <table border="1" cellpadding="5">
+        <tr><th>項目</th><th>内容</th></tr>
+        <tr><td>ID</td><td>{site['id']}</td></tr>
+        <tr><td>親調査地</td><td>{site.get('parent_site_name', '')}</td></tr>
+        <tr><td>名称</td><td>{site['name']}</td></tr>
+        <tr><td>緯度</td><td>{site['latitude']:.6f}°N</td></tr>
+        <tr><td>経度</td><td>{site['longitude']:.6f}°E</td></tr>
+        <tr><td>標高</td><td>{('-' if site['altitude'] is None else format(site['altitude'], '.1f'))}m</td></tr>
+        <tr><td>面積</td><td>{('-' if site['area'] is None else format(site['area'], '.1f'))}m²</td></tr>
+        <tr><td>備考</td><td>{site['remarks'] or '-'}</td></tr>
+        <tr><td>調査回数</td><td>{len(events)}回</td></tr>
+        </table>
         
-        if success:
-            QMessageBox.information(self, "成功", "アリ類記録を更新しました")
-            self._clear_ant_form()
-            self._load_ant_records()
+        <h4>調査履歴</h4>
+        """
+        
+        if events:
+            detail_html += """
+            <ul>
+            """
+            for event in events:
+                detail_html += f"<li>{event['survey_date']} - {event['survey_site']}</li>"
+            detail_html += "</ul>"
         else:
-            QMessageBox.critical(self, "エラー", "アリ類記録の更新に失敗しました")
+            detail_html += "<p>調査履歴なし</p>"
+        
+        self.detail_text.setHtml(detail_html)
     
-    def _delete_ant_record(self):
-        selected = self.ant_table.selectedItems()
-        if not selected:
+    def _show_species_detail(self, species_id: int):
+        """種詳細"""
+        species = self.species_model.get_by_id(species_id)
+        if not species:
             return
         
-        row = selected[0].row()
-        record_id = int(self.ant_table.item(row, 0).text())
+        # 統計情報取得
+        stats = self.ant_record_model.get_statistics_by_species(species_id)
         
-        reply = QMessageBox.question(self, "確認", "このアリ類記録を削除しますか？",
-                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        # 出現記録取得
+        records = self.ant_record_model.get_by_species(species_id)
         
-        if reply == QMessageBox.Yes:
-            if self.ant_record_model.delete(record_id):
-                QMessageBox.information(self, "成功", "アリ類記録を削除しました")
-                self._clear_ant_form()
-                self._load_ant_records()
-            else:
-                QMessageBox.critical(self, "エラー", "アリ類記録の削除に失敗しました")
+        detail_html = f"""
+        <h3>種詳細情報</h3>
+        <table border="1" cellpadding="5">
+        <tr><th>項目</th><th>内容</th></tr>
+        <tr><td>ID</td><td>{species['id']}</td></tr>
+        <tr><td>学名</td><td><i>{species['scientific_name']}</i></td></tr>
+        <tr><td>和名</td><td>{species['ja_name'] or '-'}</td></tr>
+        <tr><td>属</td><td>{species['genus'] or '-'}</td></tr>
+        <tr><td>和名属</td><td>{species['ja_genus'] or '-'}</td></tr>
+        <tr><td>亜科</td><td>{species['subfamily'] or '-'}</td></tr>
+        <tr><td>和名亜科</td><td>{species['ja_subfamily'] or '-'}</td></tr>
+        <tr><td>備考</td><td>{species['remarks'] or '-'}</td></tr>
+        </table>
+        
+        <h4>統計情報</h4>
+        <table border="1" cellpadding="5">
+        <tr><td>出現回数</td><td>{stats.get('occurrence_count', 0)}回</td></tr>
+        <tr><td>出現頻度</td><td>{stats.get('occurrence_rate', 0):.2f}%</td></tr>
+        <tr><td>平均個体数</td><td>{stats.get('avg_count', 0):.2f}個体</td></tr>
+        <tr><td>最大個体数</td><td>{stats.get('max_count', 0)}個体</td></tr>
+        <tr><td>最小個体数</td><td>{stats.get('min_count', 0)}個体</td></tr>
+        </table>
+        
+        <h4>出現記録（{len(records)}件）</h4>
+        """
+        
+        if records:
+            detail_html += """
+            <table border="1" cellpadding="5">
+            <tr><th>調査日</th><th>調査地</th><th>個体数</th></tr>
+            """
+            for record in records[:10]:  # 最新10件のみ表示
+                detail_html += f"""
+                <tr>
+                    <td>{record.get('survey_date', '')}</td>
+                    <td>{record.get('survey_site_name', '')}</td>
+                    <td>{record['count']}</td>
+                </tr>
+                """
+            detail_html += "</table>"
+            if len(records) > 10:
+                detail_html += f"<p>...他{len(records) - 10}件</p>"
+        else:
+            detail_html += "<p>出現記録なし</p>"
+        
+        self.detail_text.setHtml(detail_html)
     
-    def _clear_ant_form(self):
-        self.ant_count_spin.setValue(0)
-        self.ant_remarks_edit.clear()
-        self.ant_update_button.setEnabled(False)
-        self.ant_delete_button.setEnabled(False)
-        self.ant_table.clearSelection()
-    
-    def _on_ant_record_selected(self):
-        selected = self.ant_table.selectedItems()
-        if not selected:
-            return
-        
-        row = selected[0].row()
-        record_id = int(self.ant_table.item(row, 0).text())
-        record = self.ant_record_model.get_by_id(record_id)
-        
-        if record:
-            # 種名を選択
-            index = self.ant_species_combo.findData(record['species_id'])
-            if index >= 0:
-                self.ant_species_combo.setCurrentIndex(index)
+    def _update_statistics(self):
+        """統計サマリーを更新"""
+        try:
+            cursor = self.conn.cursor()
             
-            self.ant_count_spin.setValue(record['count'])
-            self.ant_remarks_edit.setText(record['remarks'] or '')
-            self.ant_update_button.setEnabled(True)
-            self.ant_delete_button.setEnabled(True)
+            # 親調査地数
+            cursor.execute("SELECT COUNT(*) FROM parent_sites WHERE deleted_at IS NULL")
+            parent_count = cursor.fetchone()[0]
+            
+            # 調査地数
+            cursor.execute("SELECT COUNT(*) FROM survey_sites WHERE deleted_at IS NULL")
+            site_count = cursor.fetchone()[0]
+            
+            # 調査イベント数
+            cursor.execute("SELECT COUNT(*) FROM survey_events WHERE deleted_at IS NULL")
+            event_count = cursor.fetchone()[0]
+            
+            # 種数
+            cursor.execute("SELECT COUNT(*) FROM species_master WHERE deleted_at IS NULL")
+            species_count = cursor.fetchone()[0]
+            
+            # アリ類記録数
+            cursor.execute("SELECT COUNT(*) FROM ant_records WHERE deleted_at IS NULL")
+            record_count = cursor.fetchone()[0]
+            
+            stats_text = f"親調査地: {parent_count}件 | 調査地: {site_count}件 | 調査イベント: {event_count}件 | 種数: {species_count}種 | アリ類記録: {record_count}件"
+            self.stats_label.setText(stats_text)
+            
+        except Exception as e:
+            logger.error(f"Failed to update statistics: {e}")
+            self.stats_label.setText("統計情報の取得に失敗しました")
+    
+    def _show_detailed_stats(self):
+        """詳細統計を表示"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("詳細統計情報")
+        dialog.resize(800, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        
+        # 詳細統計情報を生成
+        stats_html = self._generate_detailed_stats()
+        text_edit.setHtml(stats_html)
+        
+        layout.addWidget(text_edit)
+        
+        close_button = QPushButton("閉じる")
+        close_button.clicked.connect(dialog.close)
+        layout.addWidget(close_button)
+        
+        dialog.exec()
+    
+    def _generate_detailed_stats(self) -> str:
+        """詳細統計情報HTMLを生成"""
+        try:
+            cursor = self.conn.cursor()
+            
+            html = "<h2>詳細統計情報</h2>"
+            
+            # 調査地ごとの統計
+            html += "<h3>調査地ごとの統計</h3>"
+            cursor.execute("""
+                SELECT 
+                    ss.name as site_name,
+                    ps.name as parent_name,
+                    COUNT(DISTINCT se.id) as event_count,
+                    COUNT(DISTINCT ar.species_id) as species_count,
+                    SUM(ar.count) as total_individuals
+                FROM survey_sites ss
+                LEFT JOIN parent_sites ps ON ss.parent_site_id = ps.id
+                LEFT JOIN survey_events se ON ss.id = se.survey_site_id AND se.deleted_at IS NULL
+                LEFT JOIN ant_records ar ON se.id = ar.survey_event_id AND ar.deleted_at IS NULL
+                WHERE ss.deleted_at IS NULL
+                GROUP BY ss.id, ss.name, ps.name
+                ORDER BY ps.name, ss.name
+            """)
+            
+            rows = cursor.fetchall()
+            if rows:
+                html += """
+                <table border="1" cellpadding="5" style="border-collapse: collapse;">
+                <tr style="background-color: #e3f2fd;">
+                    <th>親調査地</th><th>調査地</th><th>調査回数</th><th>記録種数</th><th>総個体数</th>
+                </tr>
+                """
+                for row in rows:
+                    html += f"""
+                    <tr>
+                        <td>{row[1] or '-'}</td>
+                        <td>{row[0] or '-'}</td>
+                        <td>{row[2] or 0}</td>
+                        <td>{row[3] or 0}</td>
+                        <td>{row[4] or 0}</td>
+                    </tr>
+                    """
+                html += "</table>"
+            
+            # 種ごとの統計（出現頻度上位10種）
+            html += "<h3>出現頻度上位10種</h3>"
+            cursor.execute("""
+                SELECT 
+                    sm.scientific_name,
+                    sm.ja_name,
+                    COUNT(DISTINCT ar.survey_event_id) as occurrence_count,
+                    AVG(ar.count) as avg_count,
+                    MAX(ar.count) as max_count
+                FROM species_master sm
+                LEFT JOIN ant_records ar ON sm.id = ar.species_id AND ar.deleted_at IS NULL
+                WHERE sm.deleted_at IS NULL
+                GROUP BY sm.id, sm.scientific_name, sm.ja_name
+                HAVING occurrence_count > 0
+                ORDER BY occurrence_count DESC
+                LIMIT 10
+            """)
+            
+            rows = cursor.fetchall()
+            if rows:
+                html += """
+                <table border="1" cellpadding="5" style="border-collapse: collapse;">
+                <tr style="background-color: #e3f2fd;">
+                    <th>学名</th><th>和名</th><th>出現回数</th><th>平均個体数</th><th>最大個体数</th>
+                </tr>
+                """
+                for row in rows:
+                    html += f"""
+                    <tr>
+                        <td><i>{row[0]}</i></td>
+                        <td>{row[1] or '-'}</td>
+                        <td>{row[2]}</td>
+                        <td>{row[3]:.2f}</td>
+                        <td>{row[4]}</td>
+                    </tr>
+                    """
+                html += "</table>"
+            
+            # 年度別調査回数
+            html += "<h3>年度別調査回数</h3>"
+            cursor.execute("""
+                SELECT 
+                    strftime('%Y', survey_date) as year,
+                    COUNT(*) as event_count
+                FROM survey_events
+                WHERE deleted_at IS NULL AND survey_date IS NOT NULL
+                GROUP BY year
+                ORDER BY year DESC
+            """)
+            
+            rows = cursor.fetchall()
+            if rows:
+                html += """
+                <table border="1" cellpadding="5" style="border-collapse: collapse;">
+                <tr style="background-color: #e3f2fd;">
+                    <th>年度</th><th>調査回数</th>
+                </tr>
+                """
+                for row in rows:
+                    html += f"""
+                    <tr>
+                        <td>{row[0]}</td>
+                        <td>{row[1]}</td>
+                    </tr>
+                    """
+                html += "</table>"
+            
+            return html
+            
+        except Exception as e:
+            logger.error(f"Failed to generate detailed stats: {e}")
+            return "<p>詳細統計情報の生成に失敗しました</p>"

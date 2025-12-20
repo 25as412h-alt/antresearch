@@ -65,10 +65,9 @@ class MainWindow(QMainWindow):
         self.map_cluster_tab = MapClusterTab(self.database)
         self.tab_widget.addTab(self.map_cluster_tab, "地図・クラスタ")
         
-        self.settings_tab = SettingsTab(self.database, config)
+        self.settings_tab = SettingsTab(self.database, self.config)
         self.tab_widget.addTab(self.settings_tab, "設定・管理")
-        self._add_placeholder_tab("地図・クラスタ")
-        self._add_placeholder_tab("設定・管理")
+
     
     def _add_placeholder_tab(self, title: str):
         """プレースホルダータブを追加"""

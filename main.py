@@ -43,8 +43,12 @@ def load_config():
     config = configparser.ConfigParser()
     config_file = Path("config.ini")
     
+    print(f"Config file path: {config_file.absolute()}")  # デバッグ用
+    print(f"Config file exists: {config_file.exists()}")  # デバッグ用
+    
     if config_file.exists():
         config.read(config_file, encoding='utf-8')
+        print("Config sections:", config.sections())  # デバッグ用
     else:
         logging.warning(f"Config file not found: {config_file}")
     
@@ -118,6 +122,34 @@ def main():
             logger.info("Database integrity check: OK")
         else:
             logger.warning("Database integrity check: FAILED")
+        
+        # サンプルデータ生成オプション（初回起動時のみ）
+        from PySide6.QtWidgets import QMessageBox
+        cursor = database.connect().cursor()
+        cursor.execute("SELECT COUNT(*) FROM parent_sites WHERE deleted_at IS NULL")
+        parent_count = cursor.fetchone()[0]
+        
+        if parent_count == 0:
+            reply = QMessageBox.question(
+                None,
+                "初回起動",
+                "データベースが空です。サンプルデータを生成しますか？\n"
+                "（親調査地3件、調査地5件、種13種、調査イベント6件を生成します）",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                from utils.sample_data import generate_sample_data
+                if generate_sample_data(database):
+                    logger.info("Sample data generated successfully")
+                    QMessageBox.information(
+                        None,
+                        "完了",
+                        "サンプルデータを生成しました"
+                    )
+                else:
+                    logger.error("Sample data generation failed")
         
         # メインウィンドウ作成
         main_window = MainWindow(database, config)
