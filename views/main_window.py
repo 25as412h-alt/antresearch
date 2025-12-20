@@ -48,13 +48,29 @@ class MainWindow(QMainWindow):
         
         # 各タブを追加
         from views.data_input_tab import DataInputTab
+        from views.data_view_tab import DataViewTab
+        try:
+            from views.analysis_tab import AnalysisTab
+        except Exception:
+            class AnalysisTab(QWidget):
+                def __init__(self, database):
+                    super().__init__()
+                def refresh(self):
+                    pass
+                
+        from views.map_cluster_tab import MapClusterTab
         
         self.data_input_tab = DataInputTab(self.database)
         self.tab_widget.addTab(self.data_input_tab, "データ管理")
         
+        self.data_view_tab = DataViewTab(self.database)
+        self.tab_widget.addTab(self.data_view_tab, "データ閲覧")
+        
+        self.analysis_tab = AnalysisTab(self.database)
+        self.tab_widget.addTab(self.analysis_tab, "解析・出力")
+        
         # プレースホルダータブ（後で実装）
-        self._add_placeholder_tab("データ閲覧")
-        self._add_placeholder_tab("解析・出力")
+        self._add_placeholder_tab("地図・クラスタ")
         self._add_placeholder_tab("地図・クラスタ")
         self._add_placeholder_tab("設定・管理")
     
